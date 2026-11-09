@@ -298,6 +298,7 @@
       </div>
       <div class="list">
         <button class="li" id="btnReport"><span class="t">生成月报</span><span class="d">存成图片</span><span class="chev">›</span></button>
+        <button class="li" id="btnBill"><span class="t">导入支付宝 / 微信账单</span><span class="d">CSV 批量</span><span class="chev">›</span></button>
         <button class="li" id="btnExport"><span class="t">导出备份</span><span class="d" id="expCount">—</span><span class="chev">›</span></button>
         <button class="li" id="btnCopy"><span class="t">复制备份到剪贴板</span><span class="d">粘贴到备忘录</span><span class="chev">›</span></button>
         <button class="li" id="btnImport"><span class="t">导入备份</span><span class="d">从文件恢复</span><span class="chev">›</span></button>
@@ -307,9 +308,10 @@
         <button class="li danger" id="btnClear"><span class="t">清空当前账本</span><span class="chev">›</span></button>
       </div>
       <div class="tip">
+        <p><b>账单批量导入</b>：支付宝「我的 → 账单 → 右上角 → 开具交易流水证明」导出 CSV；微信「我 → 服务 → 钱包 → 账单 → 常见问题 → 下载账单 → 用于个人对账」，邮件收到的是加密压缩包，解压出 CSV 再导入。重复的记录会自动跳过。</p>
         <p><b>数据存在这台手机上</b>（Safari 本地存储），不上传任何服务器。换机、重装、清理 Safari 数据前，请先「导出备份」。</p>
         <p><b>添加到主屏幕</b>：Safari 打开本页 → 底部「分享」→「添加到主屏幕」，之后全屏使用。</p>
-        <p>账本 v2.0 · 单机版</p>
+        <p>账本 v2.1 · 单机版</p>
       </div>
     </div>
   </section>
@@ -341,6 +343,7 @@
 </div>
 <div class="toast" id="toast"></div>
 <input type="file" id="fileIn" accept=".json,application/json" style="display:none">
+<input type="file" id="billIn" accept=".csv,.txt,text/csv,text/plain" style="display:none">
 
 <script>
 'use strict';
@@ -1031,6 +1034,183 @@
     };
     r.readAsText(f); e.target.value = '';
   };
+  /* ================= 账单导入（支付宝 / 微信 CSV） ================= */
+  var CAT_RULES = [
+    [/餐饮|美食|食品|外卖|咖啡|奶茶|快餐|正餐|小吃|烘焙/, '餐饮'],
+    [/交通|出行|打车|地铁|公交|加油|停车|机票|火车|铁路|滴滴|高铁/, '交通'],
+    [/购物|百货|服饰|数码|电器|美妆|母婴|超市|电商|淘宝|京东|拼多多/, '购物'],
+    [/居家|住房|物业|水电|燃气|话费|宽带|生活服务|家政|快递|维修/, '居家'],
+    [/娱乐|休闲|旅游|酒店|电影|游戏|演出|运动|会员|视频/, '娱乐'],
+    [/医疗|健康|药|医院|体检|诊所|挂号/, '医疗'],
+    [/教育|培训|图书|学习|课程|文具|考试|学费/, '学习'],
+    [/人情|红包|转账|亲友|礼金|代付|份子/, '人情'],
+    [/工资|薪|奖金|报销|补贴/, '工资'],
+    [/兼职|劳务|稿费|副业|佣金/, '兼职'],
+    [/退款|退货|赔付/, '其他']
+  ];
+  function mapCat(src, type){
+    var s = String(src || '');
+    var pool = type === 'i' ? B().cats.i : B().cats.e;
+    function pick(c){ return pool.indexOf(c) >= 0 ? c : (pool.indexOf('其他') >= 0 ? '其他' : pool[0]); }
+    if(type === 'i'){
+      if(/红包/.test(s)) return pick('红包');
+      if(/工资|薪|奖金|补贴|报销/.test(s)) return pick('工资');
+      if(/兼职|劳务|稿费|副业|佣金/.test(s)) return pick('兼职');
+    }
+    for(var i = 0; i < CAT_RULES.length; i++){
+      if(CAT_RULES[i][0].test(s)) return pick(CAT_RULES[i][1]);
+    }
+    return pick('其他');
+  }
+  function guessAcc(src){
+    var s = String(src || '');
+    if(/微信|零钱/.test(s)) return 'wx';
+    if(/余额宝|花呗|支付宝/.test(s)) return 'ali';
+    if(/现金/.test(s)) return 'cash';
+    if(/卡|银行|储蓄|信用/.test(s)) return 'bank';
+    return null;
+  }
+  function decodeBuf(buf){
+    var u8 = new Uint8Array(buf);
+    var txt = new TextDecoder('utf-8').decode(u8);
+    var bad = (txt.match(/\uFFFD/g) || []).length;
+    if(bad > 2){
+      var labs = ['gbk', 'gb18030', 'big5'];
+      for(var i = 0; i < labs.length; i++){
+        try{
+          var t = new TextDecoder(labs[i]).decode(u8);
+          if((t.match(/\uFFFD/g) || []).length < bad){ txt = t; break; }
+        }catch(e){}
+      }
+    }
+    return txt.replace(/^\uFEFF/, '');
+  }
+  function splitCsv(text, sep){
+    var rows = [], row = [], cur = '', q = false;
+    for(var i = 0; i < text.length; i++){
+      var c = text.charAt(i);
+      if(q){
+        if(c === '"'){ if(text.charAt(i+1) === '"'){ cur += '"'; i++; } else { q = false; } }
+        else cur += c;
+      }else{
+        if(c === '"') q = true;
+        else if(c === sep){ row.push(cur); cur = ''; }
+        else if(c === '\n'){ row.push(cur); rows.push(row); row = []; cur = ''; }
+        else if(c === '\r'){ }
+        else cur += c;
+      }
+    }
+    if(cur !== '' || row.length){ row.push(cur); rows.push(row); }
+    return rows;
+  }
+  function parseBill(text){
+    var head = text.slice(0, 4000);
+    var sep = ',';
+    if((head.match(/\t/g) || []).length > (head.match(/,/g) || []).length) sep = '\t';
+    var rows = splitCsv(text, sep);
+    var hi = -1, cols = null;
+    for(var i = 0; i < rows.length && i < 40; i++){
+      var probe = rows[i].map(function(x){ return String(x).trim(); }).join('|');
+      if(/交易时间|交易创建时间|付款时间/.test(probe) && /金额/.test(probe)){ hi = i; cols = rows[i].map(function(x){ return String(x).trim(); }); break; }
+    }
+    if(hi < 0) return null;
+    function col(re){ for(var k = 0; k < cols.length; k++){ if(re.test(cols[k])) return k; } return -1; }
+    var cTime = col(/交易时间|交易创建时间|付款时间/);
+    var cAmt  = col(/金额/);
+    var cDir  = col(/收\/支|收支/);
+    var cPeer = col(/交易对方|对方/);
+    var cGood = col(/商品说明|商品名称|商品/);
+    var cCat  = col(/交易分类|类型/);
+    var cPay  = col(/收\/付款方式|付款方式|支付方式/);
+    var cStat = col(/交易状态|当前状态/);
+    if(cAmt < 0 || cTime < 0) return null;
+    var out = { tx:[], skip:0, bad:0, source: /交易分类|收\/付款方式/.test(cols.join('')) ? '支付宝' : '微信' };
+    for(var j = hi + 1; j < rows.length; j++){
+      var r = rows[j];
+      if(!r || r.length < 3) continue;
+      var dir = cDir >= 0 ? String(r[cDir] || '').trim() : '';
+      if(/不计收支/.test(dir)){ out.skip++; continue; }
+      var st = cStat >= 0 ? String(r[cStat] || '') : '';
+      if(/关闭|失败|已退款|退款成功|撤销/.test(st)){ out.skip++; continue; }
+      var amt = parseFloat(String(r[cAmt] || '').replace(/[^0-9.]/g, ''));
+      if(!amt || amt <= 0){ out.bad++; continue; }
+      var d = String(r[cTime] || '').trim().slice(0, 10).replace(/\//g, '-');
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(d)){ out.bad++; continue; }
+      var type = /收入/.test(dir) ? 'i' : 'e';
+      var peer = cPeer >= 0 ? String(r[cPeer] || '').trim() : '';
+      var good = cGood >= 0 ? String(r[cGood] || '').trim() : '';
+      var label = (good && good !== '/' ? good : peer) || (type === 'i' ? '收入' : '支出');
+      var acc = guessAcc(cPay >= 0 ? r[cPay] : '') || (B().accs[0] && B().accs[0].id);
+      out.tx.push({
+        id: uid(), t: type, a: Math.round(amt * 100) / 100,
+        c: mapCat((cCat >= 0 ? String(r[cCat] || '') : '') + ' ' + peer + ' ' + good, type),
+        acc: acc, n: label.slice(0, 40), d: d, ts: Date.parse(d + 'T12:00:00') || Date.now()
+      });
+    }
+    return out;
+  }
+  function txSig(t){ return t.d + '|' + t.t + '|' + Number(t.a).toFixed(2) + '|' + String(t.n || '').slice(0, 6); }
+  function billAdd(res){
+    var exist = {};
+    B().tx.forEach(function(t){ exist[txSig(t)] = 1; });
+    var add = [], dup = 0;
+    res.tx.forEach(function(t){
+      var k = txSig(t);
+      if(exist[k]){ dup++; } else { exist[k] = 1; add.push(t); }
+    });
+    return { add: add, dup: dup };
+  }
+  function billCommit(add){
+    var b = B();
+    b.tx = b.tx.concat(add);
+    save();
+  }
+  function showBillPreview(res){
+    var pack = billAdd(res), add = pack.add, dup = pack.dup;
+    var expSum = 0, incSum = 0, expN = 0, incN = 0;
+    add.forEach(function(t){ if(t.t === 'e'){ expSum += t.a; expN++; } else { incSum += t.a; incN++; } });
+    var rowsHtml = add.slice(0, 30).map(function(t){
+      return '<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 0;font-size:14px;border-top:1px solid var(--line)">' +
+        '<span style="color:var(--muted);white-space:nowrap">' + t.d.slice(5) + '</span>' +
+        '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(t.c) + ' · ' + escapeHtml(t.n) + '</span>' +
+        '<span style="font-weight:600;color:' + (t.t === 'e' ? 'var(--exp)' : 'var(--inc)') + '">' + (t.t === 'e' ? '&#8722;' : '+') + money(t.a) + '</span></div>';
+    }).join('');
+    var info = '来源 ' + res.source + '：识别 ' + res.tx.length + ' 条' +
+      (dup ? '，已存在跳过 ' + dup + ' 条' : '') + (res.skip ? '，忽略不计收支/失败 ' + res.skip + ' 条' : '');
+    var sumLine = add.length
+      ? '将新增 ' + add.length + ' 条：支出 ' + expN + ' 笔 ' + money(expSum) + ' 元，收入 ' + incN + ' 笔 ' + money(incSum) + ' 元'
+      : '没有新记录可导入';
+    sheet({
+      title: add.length ? '导入 ' + add.length + ' 条' : '没有新记录',
+      text: info + ' ' + sumLine,
+      html: '<div style="max-height:45vh;overflow:auto;margin-top:6px">' + rowsHtml + '</div>',
+      buttons: add.length
+        ? [{ label:'取消' }, { label:'确认导入', style:'ok', fn:function(){
+            billCommit(add); closeSheet(); toast('已导入 ' + add.length + ' 条'); go('list');
+          }}]
+        : [{ label:'好' }]
+    });
+  }
+  function importBillText(txt){
+    var res = null;
+    try{ res = parseBill(txt); }catch(e){ res = null; }
+    if(!res || !res.tx.length){ toast('没认出账单格式，确认是支付宝/微信导出的 CSV'); return; }
+    showBillPreview(res);
+  }
+  $('#btnBill').onclick = function(){ $('#billIn').click(); };
+  $('#billIn').onchange = function(e){
+    var f = e.target.files && e.target.files[0];
+    if(!f) return;
+    var r = new FileReader();
+    r.onload = function(){
+      try{ importBillText(decodeBuf(r.result)); }
+      catch(err){ toast('文件读不出来'); }
+    };
+    r.onerror = function(){ toast('文件读不出来'); };
+    r.readAsArrayBuffer(f);
+    e.target.value = '';
+  };
+
   $('#btnClear').onclick = function(){
     var b = B();
     sheet({ title:'清空「'+b.name+'」？', text:'共 '+b.tx.length+' 条记录，删除后无法恢复。建议先导出备份。', buttons:[
