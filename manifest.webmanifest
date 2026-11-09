@@ -1,0 +1,16 @@
+{
+  "name": "账本 · 记账",
+  "short_name": "账本",
+  "description": "轻量记账：收支、分类、月度统计，数据只存本机。",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F5F3EE",
+  "theme_color": "#F5F3EE",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "icon.png", "sizes": "180x180", "type": "image/png", "purpose": "any" },
+    { "src": "icon512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
